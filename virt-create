@@ -1,0 +1,254 @@
+#! /usr/bin/python
+from __future__ import print_function
+
+import sys, argparse, libvirt, os, requests, serial, yaml, math, subprocess, shutil, signal, psutil, keyboard
+from tqdm import tqdm
+from pathlib import Path
+from slugify import slugify
+
+with open('config.yaml', 'r') as f:
+    config = yaml.load(f)
+
+parser = argparse.ArgumentParser(description="Create virtual guest via cloud images")
+required_named = parser.add_argument_group('Required arguments')
+required_named.add_argument("-n", "--name", help="Define guest name", required=True)
+required_named.add_argument("-D", "--distro", help="Select distrobution", required=True)
+required_named.add_argument("-m", "--memory", help="Define max memory limit (MB)", required=True)
+required_named.add_argument("-d", "--disk", help="Set disk size (GB)", required=True)
+required_named.add_argument("-P", "--public-key", help="SSH public key", required=True)
+parser.add_argument("-v", "--log-level", help="Set log level")
+parser.add_argument("-c", "--cloud-config", help="Path to cloud config yaml")
+parser.add_argument("-H", "--hostname", help="Hostname for new guest. DEFAULT: `-c` name")
+parser.add_argument("-p", "--packages", help="Add additional packages [comma seperated, no spaces]")
+parser.add_argument("-U", "--user", help="Create new user inside guest")
+parser.add_argument("-UP", "--user-public-key", help="Public key for new user. DEFAULT: `-P` public-key")
+args = parser.parse_args()
+
+slug = slugify(args.name, separator="_")
+
+def get_pid(name):
+    return int(subprocess.check_output(["pidof",name]).strip("\n"))
+
+def virt_install(filetype):
+    cmd = [
+    "virt-install",
+    "-n",
+    args.name,
+    "-r",
+    args.memory,
+    "-w",
+    "network={0}".format(config['guest_defaults']['network']),
+    "--disk",
+    "{0}/{1}.{2}".format(config['paths']['live_images'], slug, filetype),
+    "--import",
+    "--os-type",
+    "linux",
+    "--os-variant",
+    "generic",
+    "--disk", 
+    "path={0}/{1}.iso,device=cdrom".format(config['paths']['live_iso_images'], slug),
+    "--boot",
+    "useserial=on",
+    "--channel",
+    "unix,mode=bind,path=/var/lib/libvirt/qemu/f16x86_64.agent,target_type=virtio,name=org.qemu.guest_agent.0",
+    "--graphics",
+    "none",
+    "--console", 
+    "pty,target_type=serial"
+]
+
+    with open('/tmp/console.log', 'w') as f:
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        line = ""
+        print("Performing first boot, and provisioning via cloud config")
+        print("This may take a while...")
+        for c in iter(lambda: process.stdout.read(1), ''):
+            line = line + c
+            if c == "\n":
+                if '-----END SSH HOST KEY KEYS-----' in line:
+                    p = psutil.Process(get_pid("virsh"))
+                    p.kill()
+                    process.terminate()
+                    subprocess.check_output(["reset"])
+                line = ""
+            f.write(c)
+            sys.stdout.write(c)       
+    print("Cloud image installed")
+    os.remove("/tmp/console.log")
+
+def merge_two_dicts(x, y):
+    z = x.copy()
+    z.update(y)
+    return z
+
+
+def copy_base_to_live(filename):
+    source_file = "{0}/{1}".format(config['paths']['base_images'], filename)
+    dest_file = "{0}/{1}.{2}".format(config['paths']['live_images'], slug, filename.split(".")[-1])
+    print("Copying {0} to {1}".format(source_file, dest_file))
+    shutil.copyfile( source_file, dest_file )
+    return
+    
+
+def make_iso(user_data, meta_data):
+    print("Creating IOS image at {0}/{1}.iso".format(config['paths']['live_iso_images'], slug))
+    os.rename(user_data, "/tmp/user-data")
+    os.rename(meta_data, "/tmp/meta-data")
+
+    cmd = [
+        "genisoimage", 
+        "-output", 
+        "{0}/{1}.iso".format(config['paths']['live_iso_images'], slug), 
+        "-input-charset",
+        "utf-8",
+        "-volid", 
+        "cidata", 
+        "-joliet", 
+        "-rock", 
+        "/tmp/user-data", 
+        "/tmp/meta-data" 
+    ]
+
+    try:
+        out=subprocess.check_output(cmd)
+    except subprocess.CalledProcessError as e:
+        errstr="Cmd: {0} returned {1}\\n".format(e.cmd, e.returncode)
+        if e.output != None:
+            errstr=errstr+"Output {0}\n".format(e.output)
+        raise execCmdError(errstr)
+    except:
+        print("Something went wrong")
+        quit()
+
+    try:
+        os.remove("/tmp/user-data")
+        os.remove("/tmp/meta-data")
+        os.remove(user_data)
+        os.remove(meta_data)
+    except OSError:
+        pass
+
+    return (out)
+
+
+def create_meta_data():
+    print("Creating meta data")
+    meta_data = {
+        "instance-id": slug,
+        "local-hostname": slug
+    }
+    print("Writing meta data to /tmp/{0}.meta-data".format(slug))
+    f = open("/tmp/{0}.meta-data".format(slug), "w")
+    f.write(yaml.dump(meta_data, indent=2, default_flow_style=False))    
+
+
+def create_user_data():
+    print("Creating user data")
+    user_data = {
+        "hostname": slug,
+        "packages": [
+            "qemu-guest-agent"
+        ]
+    }
+    if args.packages:
+        user_data['packages'] = user_data['packages'] + args.packages.split(',')
+
+    if args.user:
+        new_user = args.user
+        if args.user_public_key:
+            with open(args.user_public_key, 'r') as key:
+                pkey = key.read()
+        else:
+            with open(args.public_key, 'r') as key:
+                pkey = key.read()
+        pkey = "{0} {1}".format(pkey.strip("\n").split(" ")[0], pkey.strip("\n").split(" ")[1])
+        user = {
+            "users": [
+                {
+                    "name": new_user,
+                    "ssh-authorized-keys": [ pkey ],
+                    "sudo": ['ALL=(ALL) NOPASSWD:ALL'],
+                    "groups": "sudo",
+                    "shell": "/bin/bash"
+                }
+            ]
+        }
+        user_data = merge_two_dicts( user_data, user )
+    if args.cloud_config:
+        with open(args.cloud_config, 'r') as f:
+            cloud_dict = yaml.load(f)
+        user_data = merge_two_dicts(user_data, cloud_dict)
+    print("Writing user data to /tmp/{0}.user-data".format(slug))
+    f = open("/tmp/{0}.user-data".format(slug), "w")
+    f.write("#cloud-config\n\n")
+    f.write(yaml.dump(user_data, indent=4, default_flow_style=False))
+    print(yaml.dump(user_data, indent=4, default_flow_style=False))
+
+def check_or_download(image):
+    filename = image['url'].split('/')[-1]
+    print('Checking for local copy of {0}'.format(filename))
+    my_file = Path('{0}/{1}'.format(config['paths']['base_images'], filename))
+    if my_file.is_file():
+        print("{0} has been found locally.".format(filename))
+        copy_base_to_live(filename)
+        return filename.split('.')[-1]
+    print("Local file not found")
+    url = image['url']
+    r = requests.get(url, stream=True)
+    total_size = int(r.headers.get('content-length', 0));
+    block_size = 1024 ^ 2
+    wrote = 0 
+    print("Downloading {0} tp {1}".format(filename, config['paths']['base_images']))
+    with open('{0}/{1}'.format(config['paths']['base_images'], filename), 'wb') as f:
+        for data in tqdm(
+            r.iter_content(block_size), 
+            total=math.ceil(total_size//block_size), 
+            unit='B',
+            unit_scale=True, 
+            desc=filename):
+
+            wrote = wrote  + len(data)
+            f.write(data)
+    if total_size != 0 and wrote != total_size:
+        print("ERROR, something went wrong")
+    copy_base_to_live(filename)
+    return filename.split('.')[-1]
+
+
+def post_install_info():
+    conn = libvirt.open()
+    if conn == None:
+        print('Failed to open connection to qemu:///system', file=sys.stderr)
+        exit(1)
+
+    domainName = args.name
+    dom = conn.lookupByName(domainName)
+    if dom == None:
+        print('Failed to get the domain object', file=sys.stderr)
+
+    ifaces = dom.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT, 0)
+
+    print('\n')
+    print('Linux Distro: {0}'.format(args.distro.split('-')[0]))
+    print('Distro Version: {0}'.format(args.distro.split('-')[1]))
+    print('Hostname: {0}'.format(slug))
+    print('Disk Size: {0}GB'.format(args.disk))
+    print("The interface IP addresses:")
+    for (name, val) in ifaces.iteritems():
+        if val['addrs']:
+            for ipaddr in val['addrs']:
+                if ipaddr['type'] == libvirt.VIR_IP_ADDR_TYPE_IPV4 and ipaddr['addr'] != '127.0.0.1':
+                    print("\tIPv4 Address: {0}".format(ipaddr['addr']))
+                elif ipaddr['type'] == libvirt.VIR_IP_ADDR_TYPE_IPV6 and ipaddr['addr'] != '::1':
+                    print("\tIPv6 Address: {0}".format(ipaddr['addr']))
+
+    conn.close()
+
+for x in config['distros']:
+    if x['name'] == args.distro.split('-')[0] and x['version'] == args.distro.split('-')[1]:
+        filetype = check_or_download(x)
+        create_user_data()
+        create_meta_data()
+        make_iso("/tmp/{0}.user-data".format(slug), "/tmp/{0}.meta-data".format(slug))
+        virt_install(filetype)
+        post_install_info()
