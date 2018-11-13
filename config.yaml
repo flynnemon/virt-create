@@ -2,10 +2,14 @@ log_level: "debug"
 guest_defaults:
   network: "bridge"
 paths:
-  base_images: "/opt/data/base-images"
-  live_images: "/opt/data/cloud-images"
-  live_iso_images: "/opt/data/isos"
+  base_images: "/opt/kvm/cloud-images"
+  live_images: "/opt/kvm/live-images"
+  live_iso_images: "/opt/kvm/seed-isos"
 distros:
+  - name: "ubuntu"
+    version: "18.10"
+    url: "https://cloud-images.ubuntu.com/cosmic/current/cosmic-server-cloudimg-amd64.img"
+    
   - name: "ubuntu"
     version: "18.04"
     url: "https://cloud-images.ubuntu.com/bionic/current/bionic-server-cloudimg-amd64.img"

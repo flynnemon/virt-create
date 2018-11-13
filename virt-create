@@ -6,7 +6,7 @@ from tqdm import tqdm
 from pathlib import Path
 from slugify import slugify
 
-with open('config.yaml', 'r') as f:
+with open('{0}/{1}'.format(os.path.dirname(os.path.abspath(__file__)), 'config.yaml'), 'r') as f:
     config = yaml.load(f)
 
 parser = argparse.ArgumentParser(description="Create virtual guest via cloud images")
@@ -24,7 +24,7 @@ parser.add_argument("-U", "--user", help="Create new user inside guest")
 parser.add_argument("-UP", "--user-public-key", help="Public key for new user. DEFAULT: `-P` public-key")
 args = parser.parse_args()
 
-slug = slugify(args.name, separator="_")
+slug = slugify(args.name)
 
 def get_pid(name):
     return int(subprocess.check_output(["pidof",name]).strip("\n"))
@@ -45,7 +45,7 @@ def virt_install(filetype):
     "linux",
     "--os-variant",
     "generic",
-    "--disk", 
+    "--disk",
     "path={0}/{1}.iso,device=cdrom".format(config['paths']['live_iso_images'], slug),
     "--boot",
     "useserial=on",
@@ -53,7 +53,7 @@ def virt_install(filetype):
     "unix,mode=bind,path=/var/lib/libvirt/qemu/f16x86_64.agent,target_type=virtio,name=org.qemu.guest_agent.0",
     "--graphics",
     "none",
-    "--console", 
+    "--console",
     "pty,target_type=serial"
 ]
 
@@ -72,7 +72,7 @@ def virt_install(filetype):
                     subprocess.check_output(["reset"])
                 line = ""
             f.write(c)
-            sys.stdout.write(c)       
+            sys.stdout.write(c)
     print("Cloud image installed")
     os.remove("/tmp/console.log")
 
@@ -88,7 +88,7 @@ def copy_base_to_live(filename):
     print("Copying {0} to {1}".format(source_file, dest_file))
     shutil.copyfile( source_file, dest_file )
     return
-    
+
 
 def make_iso(user_data, meta_data):
     print("Creating IOS image at {0}/{1}.iso".format(config['paths']['live_iso_images'], slug))
@@ -96,17 +96,17 @@ def make_iso(user_data, meta_data):
     os.rename(meta_data, "/tmp/meta-data")
 
     cmd = [
-        "genisoimage", 
-        "-output", 
-        "{0}/{1}.iso".format(config['paths']['live_iso_images'], slug), 
+        "genisoimage",
+        "-output",
+        "{0}/{1}.iso".format(config['paths']['live_iso_images'], slug),
         "-input-charset",
         "utf-8",
-        "-volid", 
-        "cidata", 
-        "-joliet", 
-        "-rock", 
-        "/tmp/user-data", 
-        "/tmp/meta-data" 
+        "-volid",
+        "cidata",
+        "-joliet",
+        "-rock",
+        "/tmp/user-data",
+        "/tmp/meta-data"
     ]
 
     try:
@@ -139,7 +139,7 @@ def create_meta_data():
     }
     print("Writing meta data to /tmp/{0}.meta-data".format(slug))
     f = open("/tmp/{0}.meta-data".format(slug), "w")
-    f.write(yaml.dump(meta_data, indent=2, default_flow_style=False))    
+    f.write(yaml.dump(meta_data, indent=2, default_flow_style=False))
 
 
 def create_user_data():
@@ -197,14 +197,14 @@ def check_or_download(image):
     r = requests.get(url, stream=True)
     total_size = int(r.headers.get('content-length', 0));
     block_size = 1024 ^ 2
-    wrote = 0 
+    wrote = 0
     print("Downloading {0} tp {1}".format(filename, config['paths']['base_images']))
     with open('{0}/{1}'.format(config['paths']['base_images'], filename), 'wb') as f:
         for data in tqdm(
-            r.iter_content(block_size), 
-            total=math.ceil(total_size//block_size), 
+            r.iter_content(block_size),
+            total=math.ceil(total_size//block_size),
             unit='B',
-            unit_scale=True, 
+            unit_scale=True,
             desc=filename):
 
             wrote = wrote  + len(data)
